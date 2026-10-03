@@ -1,153 +1,106 @@
-# InvesTech - API Python de Monitoramento
+# InvesTech Monitor
 
-A aplicação consulta parâmetros ativos no MySQL, agrupa os parâmetros por ativo e faz uma única chamada de cotação por ativo.
-
-Depois, a mesma cotação é usada para avaliar todos os parâmetros daquele ativo.
+Aplicação Python responsável por monitorar parâmetros de investimento cadastrados no MySQL, consultar cotações na Brapi e enviar propostas para uma fila do RabbitMQ.
 
 ## Fluxo
 
-1. Python consulta `parametro` onde `status_parametro = 1`.
-2. Agrupa por `tipo_ativo + ativo_nome`.
-3. Faz uma chamada para a brapi por grupo de ativo.
-4. Obtém `regularMarketPrice`.
-5. Avalia cada parâmetro.
-6. Se a regra for atendida, envia um POST para `DECISAO_URL`.
-7. O monitor repete o processo a cada `MONITOR_INTERVAL_SECONDS`.
-
-## Regras implementadas
-
-### COMPRA
-
 ```text
-preço atual <= preco_maximo
+MySQL → Python → Brapi → Python → RabbitMQ
 ```
 
-### VENDA
+O sistema:
 
-```text
-preço atual >= preco_minimo
-```
+* Busca os parâmetros ativos no MySQL.
+* Consulta as cotações dos ativos na Brapi.
+* Verifica se o preço atingiu o valor configurado para compra ou venda.
+* Gera uma proposta.
+* Envia a proposta para a fila `propostas`.
+* Repete o processo conforme o intervalo configurado.
 
-`quantidade_maxima` é usada como `quantidadeAprovada`.
+## Tecnologias
 
-## Importante sobre propostaId
+* Python
+* FastAPI
+* MySQL
+* Brapi
+* RabbitMQ
+* Pika
 
-O JSON de decisão exige:
+## Configuração
 
-```json
-"propostaId": 0
-```
+Crie um arquivo `.env` na raiz:
 
-Porém, a tabela `parametro` fornecida não possui `proposta_id`.
+```env
+DB_HOST=localhost
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=sua_senha
+DB_NAME=investech
 
-Por isso o projeto envia `0` até que o relacionamento seja definido.
+BRAPI_BASE_URL=https://brapi.dev
+BRAPI_API_TOKEN=
 
-A opção mais consistente é adicionar:
+RABBITMQ_HOST=localhost
+RABBITMQ_PORT=5672
+RABBITMQ_USER=investech
+RABBITMQ_PASSWORD=sua_senha
+RABBITMQ_QUEUE=propostas
+RABBITMQ_VHOST=/
 
-```sql
-ALTER TABLE parametro
-ADD COLUMN proposta_id INT,
-ADD CONSTRAINT fk_parametro_proposta
-FOREIGN KEY (proposta_id) REFERENCES proposta(id);
-```
-
-Depois, o Python pode enviar:
-
-```python
-"propostaId": parametro["proposta_id"]
+MONITOR_INTERVAL_SECONDS=60
+DECISION_COOLDOWN_SECONDS=300
+DEFAULT_QUANTITY=1
+NIVEL_RISCO_PADRAO=2
 ```
 
 ## Instalação
+
+Crie o ambiente virtual:
 
 ```bash
 python -m venv venv
 ```
 
-Windows:
+Ative:
 
 ```bash
 venv\Scripts\activate
 ```
 
-Linux:
-
-```bash
-source venv/bin/activate
-```
-
-Instale:
+Instale as dependências:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Copie:
+## Execução
 
-```text
-.env.example
-```
-
-para:
-
-```text
-.env
-```
-
-e configure MySQL, token da brapi e URL do backend.
-
-Execute:
+Com MySQL e RabbitMQ executando:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-A API ficará em:
+Exemplo de saída:
 
 ```text
-http://localhost:8000
+Iniciando monitoramento...
+Ativos encontrados: VALE3
+VALE3 | Preço atual: R$ 72.10
+Proposta enviada para RabbitMQ: VALE3 | VENDA
+Monitoramento finalizado.
 ```
 
-Documentação:
+## Mensagem enviada ao RabbitMQ
 
-```text
-http://localhost:8000/docs
+```json
+{
+  "tipoAtivo": "AÇÃO",
+  "nomeAtivo": "VALE3",
+  "tipoOperacao": "VENDA",
+  "quantidadeSugerida": 10.0,
+  "valorSugerido": 72.10,
+  "descricaoProposta": "O preço atual atingiu o parâmetro configurado.",
+  "nivelRisco": 2
+}
 ```
-
-## Otimização de chamadas
-
-Exemplo:
-
-```text
-Parâmetro 1 -> PETR4 -> carteira 1
-Parâmetro 2 -> PETR4 -> carteira 2
-Parâmetro 3 -> PETR4 -> carteira 3
-Parâmetro 4 -> BTC   -> carteira 1
-```
-
-O monitor não faz:
-
-```text
-GET PETR4
-GET PETR4
-GET PETR4
-GET BTC
-```
-
-Ele faz:
-
-```text
-GET PETR4
-GET BTC
-```
-
-e reutiliza as respostas.
-
-Para ações, o cliente usa o endpoint de cotação da brapi.
-
-Para cripto, usa:
-
-```text
-/api/v2/crypto?coin=BTC,ETH&currency=BRL
-```
-
-A documentação da brapi informa que esse endpoint aceita várias criptomoedas na mesma chamada.

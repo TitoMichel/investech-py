@@ -1,33 +1,83 @@
-import logging
 import time
-from datetime import datetime
 
-import requests
 
-from .brapi_client import BrapiClient
-from .config import (
-    DECISAO_URL,
+from app.rabbitmq_client import RabbitMQClient
+
+from app.config import (
+    DEFAULT_QUANTITY,
     DECISION_COOLDOWN_SECONDS,
-    DEFAULT_QUANTITY
+    NIVEL_RISCO_PADRAO
 )
-from .database import (
+from app.database import (
     buscar_parametros_ativos,
+    atualizar_preco_ativo,
     criar_ativo_se_nao_existir
 )
+from app.brapi_client import BrapiClient
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
 
-logger = logging.getLogger(__name__)
-
-# Guarda quando uma determinada condição foi enviada.
-# Isso evita POST a cada ciclo enquanto o preço continua dentro da condição.
+brapi = BrapiClient()
+rabbitmq = RabbitMQClient()
 ultimo_envio = {}
 
 
-def pode_enviar(chave):
+def analisar_parametro(parametro, preco):
+    preco_minimo = (
+        float(parametro["preco_minimo"])
+        if parametro["preco_minimo"] is not None
+        else None
+    )
+
+    preco_maximo = (
+        float(parametro["preco_maximo"])
+        if parametro["preco_maximo"] is not None
+        else None
+    )
+
+    quantidade_maxima = (
+        int(parametro["quantidade_maxima"])
+        if parametro["quantidade_maxima"] is not None
+        else DEFAULT_QUANTITY
+    )
+
+    nome_ativo = parametro["ativo_nome"].strip().upper()
+    tipo_ativo = parametro["tipo_ativo"]
+
+    if preco_maximo is not None and preco <= preco_maximo:
+        return {
+            "tipoAtivo": tipo_ativo,
+            "nomeAtivo": nome_ativo,
+            "tipoOperacao": "COMPRA",
+            "quantidadeSugerida": float(quantidade_maxima),
+            "valorSugerido": float(preco),
+            "descricaoProposta": (
+                f"O preço atual de {nome_ativo} é R$ {preco:.2f} "
+                f"e atingiu o preço máximo configurado de "
+                f"R$ {preco_maximo:.2f} para compra."
+            ),
+            "nivelRisco": NIVEL_RISCO_PADRAO
+        }
+
+    if preco_minimo is not None and preco >= preco_minimo:
+        return {
+            "tipoAtivo": tipo_ativo,
+            "nomeAtivo": nome_ativo,
+            "tipoOperacao": "VENDA",
+            "quantidadeSugerida": float(quantidade_maxima),
+            "valorSugerido": float(preco),
+            "descricaoProposta": (
+                f"O preço atual de {nome_ativo} é R$ {preco:.2f} "
+                f"e atingiu o preço mínimo configurado de "
+                f"R$ {preco_minimo:.2f} para venda."
+            ),
+            "nivelRisco": NIVEL_RISCO_PADRAO
+        }
+
+    return None
+
+def pode_enviar(parametro_id, tipo_operacao):
+    chave = (parametro_id, tipo_operacao)
+
     agora = time.time()
     ultimo = ultimo_envio.get(chave)
 
@@ -37,180 +87,120 @@ def pode_enviar(chave):
     return (agora - ultimo) >= DECISION_COOLDOWN_SECONDS
 
 
-def registrar_envio(chave):
+def registrar_envio(parametro_id, tipo_operacao):
+    chave = (parametro_id, tipo_operacao)
     ultimo_envio[chave] = time.time()
 
 
-def analisar_parametro(parametro, cotacao):
-    preco = float(cotacao["regularMarketPrice"])
+def enviar_proposta(proposta):
+    try:
+        rabbitmq.enviar(proposta)
+        return True
 
-    preco_minimo = float(parametro["preco_minimo"])
-    preco_maximo = float(parametro["preco_maximo"])
-    quantidade_maxima = float(parametro["quantidade_maxima"])
-
-    # Regra de compra:
-    # preço atual <= preço máximo que o usuário aceita pagar.
-    if preco <= preco_maximo:
-        return {
-            "retornoProposta": "APROVADA",
-            "motivo": (
-                f"Preço atual ({preco:.2f}) está abaixo ou igual "
-                f"ao preço máximo de compra ({preco_maximo:.2f})."
-            ),
-            "valorAprovado": preco,
-            "quantidadeAprovada": quantidade_maxima,
-            "tipoOperacao": "COMPRA",
-        }
-
-    # Regra de venda:
-    # preço atual >= preço mínimo pelo qual o usuário aceita vender.
-    if preco >= preco_minimo:
-        return {
-            "retornoProposta": "APROVADA",
-            "motivo": (
-                f"Preço atual ({preco:.2f}) está acima ou igual "
-                f"ao preço mínimo de venda ({preco_minimo:.2f})."
-            ),
-            "valorAprovado": preco,
-            "quantidadeAprovada": quantidade_maxima,
-            "tipoOperacao": "VENDA",
-        }
-
-    return None
-
-
-def enviar_decisao(decisao, parametro):
-    # O seu JSON exige propostaId, mas a tabela parametro não possui
-    # proposta_id. Por isso, por segurança, não inventamos esse ID.
-    # O valor 0 deve ser substituído quando o relacionamento estiver definido.
-    payload = {
-        "retornoProposta": decisao["retornoProposta"],
-        "motivo": decisao["motivo"],
-        "valorAprovado": decisao["valorAprovado"],
-        "quantidadeAprovada": decisao["quantidadeAprovada"],
-        "tipoOperacao": decisao["tipoOperacao"],
-        "propostaId": 0,
-        "carteiraId": parametro["carteira_id"]
-    }
-
-    response = requests.post(
-        DECISAO_URL,
-        json=payload,
-        timeout=10
-    )
-
-    response.raise_for_status()
-
-    return response
-
+    except Exception as erro:
+        print(f"Erro ao enviar proposta para RabbitMQ: {erro}")
 
 def executar_monitoramento():
-    logger.info("Iniciando ciclo de monitoramento...")
+    print("Iniciando monitoramento...")
 
     parametros = buscar_parametros_ativos()
 
     if not parametros:
-        logger.info("Nenhum parâmetro ativo encontrado.")
+        print("Nenhum parâmetro ativo encontrado.")
         return
 
-    # Agrupa por tipo + símbolo.
-    # Assim, vários parâmetros da mesma carteira não geram vários GETs.
-    grupos = {}
+    # Guarda apenas os símbolos únicos.
+    # Exemplo:
+    # PETR4 -> 3 parâmetros
+    # VALE3 -> 2 parâmetros
+    #
+    # A Brapi será consultada apenas uma vez para cada ativo.
+    simbolos = set()
 
     for parametro in parametros:
-        chave = (
-            parametro["tipo_ativo"].upper(),
-            parametro["ativo_nome"].upper()
-        )
-        grupos.setdefault(chave, []).append(parametro)
+        simbolo = parametro["ativo_nome"].strip().upper()
 
-    cliente = BrapiClient()
+        if simbolo:
+            simbolos.add(simbolo)
 
-    acoes = [
-        simbolo
-        for (tipo, simbolo) in grupos
-        if tipo in ("ACAO", "AÇÕES", "B3", "FII", "ETF", "BDR")
-    ]
+    if not simbolos:
+        print("Nenhum ativo válido encontrado.")
+        return
 
-    criptos = [
-        simbolo
-        for (tipo, simbolo) in grupos
-        if tipo in ("CRYPTO", "CRIPTO", "CRIPTOMOEDA")
-    ]
+    print(f"Ativos encontrados: {', '.join(sorted(simbolos))}")
 
-    cotacoes = {}
+    # Busca todas as ações de uma vez
+    cotacoes = brapi.buscar_acoes(sorted(simbolos))
 
-    try:
-        cotacoes.update(cliente.buscar_acoes(acoes))
-    except Exception as erro:
-        logger.exception("Erro ao consultar ações: %s", erro)
+    if not cotacoes:
+        print("Nenhuma cotação foi encontrada.")
+        return
 
-    try:
-        cotacoes.update(cliente.buscar_criptos(criptos))
-    except Exception as erro:
-        logger.exception("Erro ao consultar criptomoedas: %s", erro)
+    for parametro in parametros:
 
-    # Agora a cotação já foi obtida.
-    # Todos os parâmetros daquele ativo usam a mesma resposta.
-    for (tipo, simbolo), parametros_do_ativo in grupos.items():
+        parametro_id = parametro["id"]
+
+        # Normaliza o nome do ativo
+        simbolo = parametro["ativo_nome"].strip().upper()
+
         cotacao = cotacoes.get(simbolo)
 
         if not cotacao:
-            logger.warning("Cotação não encontrada para %s", simbolo)
+            print(f"Cotação não encontrada para {simbolo}")
             continue
 
         preco = cotacao.get("regularMarketPrice")
 
         if preco is None:
-            logger.warning("Preço não encontrado para %s", simbolo)
+            print(f"Preço não encontrado para {simbolo}")
             continue
 
-        for parametro in parametros_do_ativo:
-            decisao = analisar_parametro(parametro, cotacao)
+        print(
+            f"{simbolo} | "
+            f"Preço atual: R$ {preco:.2f}"
+        )
 
-            if decisao is None:
-                logger.info(
-                    "%s | parâmetro %s não atendido | preço=%.2f",
-                    simbolo,
-                    parametro["id"],
-                    preco
-                )
-                continue
+        # Atualiza o preço atual do ativo no banco
+        atualizar_preco_ativo(
+            parametro["ativo_nome"],
+            preco
+        )
 
-            chave = (
-                parametro["id"],
-                decisao["tipoOperacao"]
+        # Verifica se o parâmetro foi atingido
+        decisao = analisar_parametro(
+            parametro,
+            preco
+        )
+
+        if decisao is None:
+            continue
+
+        tipo_operacao = decisao["tipoOperacao"]
+
+        # Evita enviar várias decisões iguais em sequência
+        if not pode_enviar(
+            parametro_id,
+            tipo_operacao
+        ):
+            print(
+                f"Cooldown ativo para parâmetro "
+                f"{parametro_id} ({tipo_operacao})"
+            )
+            continue
+
+        # Envia para a API Java
+        enviado = enviar_proposta(decisao)
+        if enviado:
+            registrar_envio(
+                parametro_id,
+                tipo_operacao
             )
 
-            if not pode_enviar(chave):
-                logger.info(
-                    "%s | parâmetro %s já enviado recentemente",
-                    simbolo,
-                    parametro["id"]
-                )
-                continue
+            # Garante que o ativo exista na tabela ativo
+            criar_ativo_se_nao_existir(
+                parametro["ativo_nome"],
+                parametro["tipo_ativo"],
+                preco
+            )
 
-            try:
-                enviar_decisao(decisao, parametro)
-                registrar_envio(chave)
-
-                criar_ativo_se_nao_existir(
-                    parametro["ativo_nome"],
-                    parametro["tipo_ativo"],
-                    preco
-                )
-
-                logger.info(
-                    "%s | parâmetro %s atendido | %s | preço=%.2f",
-                    simbolo,
-                    parametro["id"],
-                    decisao["tipoOperacao"],
-                    preco
-                )
-
-            except Exception as erro:
-                logger.exception(
-                    "Erro ao enviar decisão do parâmetro %s: %s",
-                    parametro["id"],
-                    erro
-                )
+    print("Monitoramento finalizado.")

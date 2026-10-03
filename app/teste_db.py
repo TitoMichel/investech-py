@@ -26,7 +26,7 @@ try:
         password=password,
         database=database
     )
-    print("\n✅ Conexão bem-sucedida!")
+    print("\n Conexão bem-sucedida!")
     conn.close()
 except Exception as e:
-    print(f"\n❌ Erro de conexão: {e}")
+    print(f"\n Erro de conexão: {e}")

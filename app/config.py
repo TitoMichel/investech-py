@@ -17,3 +17,14 @@ DECISAO_URL = os.getenv("DECISAO_URL", "http://localhost:8080/api/decisoes")
 MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "60"))
 DECISION_COOLDOWN_SECONDS = int(os.getenv("DECISION_COOLDOWN_SECONDS", "300"))
 DEFAULT_QUANTITY = float(os.getenv("DEFAULT_QUANTITY", "1"))
+
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
+RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "queue_proposta")
+RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
+
+NIVEL_RISCO_PADRAO = int(
+    os.getenv("NIVEL_RISCO_PADRAO", "2")
+)
